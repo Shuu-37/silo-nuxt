@@ -51,14 +51,14 @@ export const STARTING_ZONES: Record<string, StartingZoneConfig> = {
   bastok: {
     name: 'Bastok Markets',
     zoneId: 235,
-    startPosition: { x: -328, z: -165 },
-    fallbackY: -6,
+    startPosition: { x: -198.1, z: -4.2 },
+    fallbackY: -10,
   },
   windurst: {
     name: 'Windurst Woods',
     zoneId: 241,
-    startPosition: { x: -1, z: -13 },
-    fallbackY: -2,
+    startPosition: { x: -42.5, z: -42.8 },
+    fallbackY: 1.08,
   },
 }
 
