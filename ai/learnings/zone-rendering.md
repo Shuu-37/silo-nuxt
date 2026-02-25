@@ -36,6 +36,8 @@ Zone DAT file
 | `lib/renderer/textureDecoder.ts` | DXT1/DXT3/BGRA32/Indexed8 → RGBA decode |
 | `lib/renderer/environmentManager.ts` | Time-of-day interpolation, sun direction, per-object env |
 | `lib/renderer/skyboxRenderer.ts` | Procedural colored hemisphere from SkyBox config |
+| `lib/resource/effectSection.ts` | Section 0x05 parser → EffectResource (minimal point light extraction) |
+| `lib/renderer/zonePointLightProvider.ts` | Resolves pointLightIndices → PointLightParams via effect data |
 | `pages/index.vue` | Application wiring: loadZone(), two DatLoaders, time-of-day UI |
 
 ### Kotlin Reference Files
@@ -226,16 +228,15 @@ Rebuilds when time-of-day changes (interpolated slice colors change).
    `0-255 → 0.0-1.0`. The shader's `2.0 *` multiplier on the final RGB output is the zone-specific
    2x scaling. Do NOT pre-multiply vertex colors by 2 in the geometry builder — that would
    result in 4x brightness (2x geometry * 2x shader).
-3. **Zone shader must force output alpha to 1.0** — Zone textures (especially
+3. **Zone shader conditionally forces output alpha** — Zone textures (especially
    DXT-compressed) contain pixels with alpha < 1.0. If these sub-1.0 alpha values
    reach the framebuffer, the HTML page background bleeds through every fragment,
    producing a uniform checkerboard/dot-grid artifact across ALL zone surfaces. The
-   fix has two parts: (a) `WebGLRenderer({ alpha: false })` and (b) the zone fragment
-   shader forces `gl_FragColor = vec4(fogged.rgb, 1.0)`. Both are necessary —
-   `alpha: false` alone is NOT sufficient (the checkerboard returns). The shader
-   `discard` handles foliage transparency (alpha test), so forcing output alpha to
-   1.0 does not break tree/bush cutouts. See `ai/learnings/alpha-transparency-clipping.md`
-   for the full investigation and explanation.
+   fix: (a) `WebGLRenderer({ alpha: false })`, (b) a `blendEnabled` uniform (float,
+   0.0 or 1.0) per material, and (c) the fragment shader uses
+   `mix(1.0, fogged.a, blendEnabled)` — opaque meshes output alpha=1.0 (preventing
+   the checkerboard), while blend-enabled meshes (water/glass) output their computed
+   alpha for proper transparency. See `ai/learnings/alpha-transparency-clipping.md`.
 4. **Separate DatLoader** — zones use `{ zoneResource: true }` parser option
 5. **`SectionOffsetSource` requires `sectionSize`** — for decryption bounds checking
 6. **Triangle winding** — collision test: `(t0-t1)`, `(t1-t2)`, `(t2-t0)` — NOT reversed
@@ -248,10 +249,12 @@ Rebuilds when time-of-day changes (interpolated slice colors change).
     for key counters. The TypeScript port must NOT apply `& 0xff` or `& 0xffff` masks to
     `key`, `key1`, `key2` during decryption loops. Masking causes key divergence on large
     sections, corrupting texture names and vertex data.
-13. **Empty-name mesh buffers should be skipped** — Some zone mesh resources contain buffers
-    with all-null texture names. These are geometry that requires a texture for its visual.
-    Without a texture they render as opaque gray, obscuring the real textured ground beneath.
-    Skip these buffers during rendering. (e.g., Bastok had 140 such buffers out of 2282 total)
+13. **Empty-name mesh buffers must NOT be skipped** — Some zone mesh resources contain
+    buffers with all-null texture names. These include water surfaces and other untextured
+    geometry. Kotlin renders them with the default gray (0x80) fallback texture via
+    `getTextureOrDefault()`. The TS port must do the same — render with `defaultGrayTexture()`.
+    Previously these were skipped, which made water invisible.
+    (e.g., Bastok has ~140 such buffers out of ~2282 total, many of which are water)
 14. **Environment manager needs init before use** — Call `envManager.init(zoneDirectory)` after
     parsing the zone DAT. The directory tree must be fully built first.
 15. **Per-object environmentLink** — Zone objects may have `environmentLink: "ev01"` etc.
@@ -269,6 +272,69 @@ Rebuilds when time-of-day changes (interpolated slice colors change).
 19. **Zone depth function is LESS, not LEQUAL** — Kotlin explicitly sets
     `depthFunc(LESS)`. Three.js defaults to `LessEqualDepth`. Zone materials use
     `depthFunc: LessDepth` to match.
+
+## Point Light System
+
+### Data Flow
+
+```
+Zone DAT section 0x1C (ZoneDef):
+  pointLightLinks: DatId[]         (up to 256 entries, each 4-byte DatId)
+  ZoneObject.pointLightIndices[]   (up to 4 per object, 1-indexed → 0-indexed)
+
+Zone DAT section 0x05 (Effect/ParticleGenerator):
+  EffectResource.id = DatId        (matches pointLightLinks entries)
+  autoRun flag (offset 0x79, bit 0x10)
+  linkedDataType == 0x47 → PointLight
+  Section 2 opcodes:
+    0x01: basePosition (initial world-space offset)
+    0x16: RGBA color (4 bytes, normalized 0-1)
+    0x58: range, theta, rangeMultiplier, thetaMultiplier
+
+Resolution chain:
+  ZoneObject.pointLightIndices[n]
+    → ZoneResource.pointLightLinks[n]  (DatId string)
+    → EffectResource with matching id  (discovered via collectByTypeRecursive)
+    → StaticPointLight → PointLightParams
+    → shader uniforms pointLights[0..3]
+```
+
+### Static vs Dynamic
+
+In Kotlin, point lights are fully dynamic — the particle system spawns particles with
+`LinkedDataType.PointLight`, and each frame computes position/color/range from the live
+particle state (including animation, flickering, etc.).
+
+The TS implementation currently provides **static snapshots** (time-zero values) extracted
+from the `EffectResource` parser without running the particle simulation. This gives correct
+initial values for static lights but misses animated/flickering effects.
+
+### Shader Integration
+
+The shader (`zoneShader.ts`) has 4 `PointLight` uniform slots. In the vertex shader, each
+slot contributes to `frag_pointLightSum` via `pointLightCalc()`:
+- Distance attenuation: `1 / (const + linear*d + quad*d^2)` with hard range cutoff
+- Normal-based diffuse: `dot(normal, lightDirection)`
+
+Zone objects use `attenuation = (0, 0, attenuationQuad)` (no constant/linear terms).
+Actors use `attenuation = (0.5, 0, attenuationQuad)` (extra constant term to reduce effect).
+
+### Key Files
+
+- `lib/resource/effectSection.ts` — Section 0x05 parser, extracts `StaticPointLight`
+- `lib/renderer/zonePointLightProvider.ts` — Resolves indices → uniforms
+- `lib/renderer/zoneRenderer.ts` — `applyPointLightsToMaterial()` sets per-object uniforms
+- `lib/renderer/shaders/shaderConstants.ts` — GLSL `PointLight` struct + `pointLightCalc()`
+
+### What's Missing
+
+- **Actor point lights**: Actors should inherit point lights from the collision surface they
+  stand on (`CollisionTransformInfo.lightIndices`). Needs `findGroundY` to also return
+  the `lightIndices` from the matched collision object.
+- **Animated point lights**: Flickering torches, pulsing crystals, etc. require the full
+  particle simulation system (opcode-driven keyframe animation of theta, range, color).
+- **Point light attachment**: Some particles attach point lights to other particles
+  (opcode 0x88 `PointLightAttachmentSetup`). Not relevant without the particle system.
 
 ## What's Implemented vs. Missing
 
@@ -291,7 +357,9 @@ Rebuilds when time-of-day changes (interpolated slice colors change).
 | Sun/moon direction | Done | Computed from time-of-day, model light blending at dawn/dusk |
 | Draw distance culling | Done | `updateVisibility()` hides objects beyond `drawDistance` |
 | Clear color | Done | `setClearColor()` from environment (skybox horizon or indoor color) |
-| Point lights | **Not implemented** | Data parsed, not wired to shader uniforms |
+| Point lights (zone terrain) | Done (static) | Static snapshots from effect parser; per-object uniforms wired via `ZonePointLightProvider` |
+| Point lights (actor) | **Not implemented** | Needs collider to return `lightIndices` from collision surface |
+| Point lights (animated) | **Not implemented** | Full particle system needed for flickering/animated lights |
 | Zone interactions (0x36) | **Not ported** | Doors, zone lines, elevators |
 | Weather transitions | **Not implemented** | Env manager accepts weather type but doesn't interpolate between weather changes |
 | Tree/foliage textures | Improved | Gray fallback + `discardThreshold=0.375` for `_`-prefixed. Some may still be missing textures |

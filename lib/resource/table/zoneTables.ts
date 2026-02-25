@@ -43,9 +43,9 @@ export interface StartingZoneConfig {
 
 export const STARTING_ZONES: Record<string, StartingZoneConfig> = {
   sandoria: {
-    name: "South San d'Oria",
-    zoneId: 230,
-    startPosition: { x: 133, z: 88 },
+    name: "North San d'Oria",
+    zoneId: 231,
+    startPosition: { x: 0.5, z: 89.4 },
     fallbackY: -2,
   },
   bastok: {

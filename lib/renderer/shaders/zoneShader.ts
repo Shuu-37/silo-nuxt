@@ -68,6 +68,7 @@ ${diffuseLightFragmentGlsl}
 ${fogFragmentGlsl}
 
 uniform float discardThreshold;
+uniform float blendEnabled;
 uniform sampler2D diffuseTexture;
 uniform vec4 colorMask;
 uniform vec4 ambientLightColor;
@@ -95,10 +96,10 @@ void main() {
 
   if (coloredPixel.a < discardThreshold) { discard; }
 
-  // Force output alpha to 1.0. Zone texture alpha < 1.0 (common in DXT-compressed
-  // textures) bleeds through the canvas compositing, causing a checkerboard artifact.
-  // Foliage transparency is handled by the discard above, not by alpha blending.
   vec4 fogged = colorMask * fogCalc(frag_cameraPos.xyz, coloredPixel);
-  gl_FragColor = vec4(fogged.rgb, 1.0);
+  // Opaque meshes: force alpha=1.0 to prevent DXT checkerboard artifact.
+  // Blend-enabled meshes (water/glass): preserve computed alpha for transparency.
+  float outputAlpha = mix(1.0, fogged.a, blendEnabled);
+  gl_FragColor = vec4(fogged.rgb, outputAlpha);
 }
 `

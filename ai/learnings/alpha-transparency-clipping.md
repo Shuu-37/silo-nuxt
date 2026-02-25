@@ -33,12 +33,13 @@ vec4 coloredPixel = vec4(2.0 * litFragColor.rgb * basePixel.rgb, 4.0 * litFragCo
 if (coloredPixel.a < discardThreshold) { discard; }
 outColor = colorMask * fogCalc(frag_cameraPos.xyz, coloredPixel);
 
-// TypeScript (zoneShader.ts:93-102) — note the forced alpha
+// TypeScript (zoneShader.ts:93-102) — conditional alpha via blendEnabled uniform
 float finalAlpha = clamp(4.0 * litFragColor.a * basePixel.a, 0.0, 1.0);
 vec4 coloredPixel = vec4(2.0 * litFragColor.rgb * basePixel.rgb, finalAlpha);
 if (coloredPixel.a < discardThreshold) { discard; }
 vec4 fogged = colorMask * fogCalc(frag_cameraPos.xyz, coloredPixel);
-gl_FragColor = vec4(fogged.rgb, 1.0);  // <-- FORCED to 1.0
+float outputAlpha = mix(1.0, fogged.a, blendEnabled);  // 1.0 for opaque, computed for water/glass
+gl_FragColor = vec4(fogged.rgb, outputAlpha);
 ```
 
 Key differences:
@@ -159,16 +160,18 @@ alpha=1.0 only affects fragments that survive the discard.
 
 ## Both Fixes (Applied)
 
-Both shaders (zone and character) now use the same pattern: compute alpha for the
-discard test, then force the output alpha to 1.0. This is the universal fix for
-canvas compositor bleed-through in a Three.js `alpha: false` renderer.
+Both shaders (zone and character) handle DXT alpha bleed-through. The zone shader
+uses a `blendEnabled` uniform to conditionally output alpha: opaque meshes force
+1.0, blend-enabled meshes (water/glass) preserve computed alpha for transparency.
+The character shader forces 1.0 unconditionally (no blend-enabled skeleton meshes).
 
 ## The Fix (Applied) — Details
 
 ### Zone Fragment Shader (`lib/renderer/shaders/zoneShader.ts`)
 ```glsl
 vec4 fogged = colorMask * fogCalc(frag_cameraPos.xyz, coloredPixel);
-gl_FragColor = vec4(fogged.rgb, 1.0);  // Force opaque output
+float outputAlpha = mix(1.0, fogged.a, blendEnabled);  // 1.0 for opaque, computed for water/glass
+gl_FragColor = vec4(fogged.rgb, outputAlpha);
 ```
 
 ### Character Fragment Shader (`lib/renderer/shaders/ximSkinnedShader.ts`)
@@ -188,7 +191,7 @@ new WebGLRenderer({ canvas, antialias: true, alpha: false })
 | Feature | Why it still works |
 |---------|--------------------|
 | **Foliage cutout** (trees, bushes) | Handled by `discard` before the alpha=1.0 line. Pixel is either fully rendered or fully gone. |
-| **Blended meshes** (water, glass) | Three.js `transparent: true` uses src/dst alpha blending between objects within the scene. The forced alpha=1.0 only affects the final framebuffer write, not inter-object blending order. |
+| **Blended meshes** (water, glass) | The `blendEnabled` uniform (1.0) causes the shader to output computed alpha via `mix()`. Three.js `transparent: true` + `depthWrite: false` enables proper src/dst alpha blending. |
 | **Character hair** | Uses `ximSkinnedShader` which also forces alpha=1.0 now. Transparency handled by discard at threshold `69/255`. |
 | **Fog** | Fog is applied before the alpha override. Fog color blends into RGB. |
 

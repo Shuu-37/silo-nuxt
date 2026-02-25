@@ -8,6 +8,7 @@ import {
   SectionTypes,
   type SectionTypeDef,
 } from './datResource'
+import { EffectSection } from './effectSection'
 import { EnvironmentSection } from './environmentSection'
 import { InfoSection } from './infoSection'
 import { SkeletonAnimationSection } from './skeletonAnimationSection'
@@ -117,6 +118,8 @@ class EndSection implements ResourceParser {
 
 export interface DatParserOptions {
   readonly zoneResource?: boolean
+  /** When set, only these section type codes are fully parsed; others are skipped. */
+  readonly onlySectionTypes?: ReadonlySet<number>
 }
 
 export const DatParser = {
@@ -128,6 +131,7 @@ export const DatParser = {
     const parserContext = {
       zoneResource: options?.zoneResource ?? false,
     }
+    const onlyTypes = options?.onlySectionTypes ?? null
 
     while (byteReader.hasMore()) {
       const header = new SectionHeader()
@@ -137,11 +141,21 @@ export const DatParser = {
       }
 
       const parser: ResourceParser = (() => {
+        // Structural sections must always be parsed
         if (header.sectionType.code === SectionTypes.S00_End.code) {
           return new EndSection()
         }
         if (header.sectionType.code === SectionTypes.S01_Directory.code) {
           return new DirectorySection(header, currentDirectory)
+        }
+
+        // Skip non-whitelisted sections in lightweight mode
+        if (onlyTypes !== null && !onlyTypes.has(header.sectionType.code)) {
+          return new UnhandledSection()
+        }
+
+        if (header.sectionType.code === SectionTypes.S05_Effect.code) {
+          return new EffectSection(header)
         }
         if (header.sectionType.code === SectionTypes.S45_Info.code) {
           return new InfoSection(header)
@@ -220,6 +234,11 @@ export const DatParser = {
     return rootDirectory
   },
 }
+
+/** Section type codes for lightweight info-only parsing (skips textures, meshes, animations). */
+export const InfoOnlySectionTypes: ReadonlySet<number> = new Set([
+  SectionTypes.S45_Info.code,
+])
 
 export function oops(byteReader: ByteReader, reason = ''): never {
   throw new Error(`${byteReader} | ${reason}`)

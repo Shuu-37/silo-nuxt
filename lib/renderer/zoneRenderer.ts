@@ -6,9 +6,7 @@
  */
 
 import {
-  BackSide,
   DoubleSide,
-  FrontSide,
   Group,
   LessDepth,
   Mesh,
@@ -25,9 +23,10 @@ import { getOrCreateTexture, defaultGrayTexture } from './textureFactory'
 import { zoneVertexShader, zoneFragmentShader } from './shaders/zoneShader'
 import { POINT_LIGHT_COUNT, DIFFUSE_LIGHT_COUNT } from './shaders/shaderConstants'
 import { DirectoryResource } from '~/lib/resource/datResource'
-import type { ZoneMeshResource, ZoneResource } from '~/lib/resource/zoneResource'
-import type { FogParams, LightingParams } from './lights'
+import type { ZoneMeshResource, ZoneResource, ZoneObject } from '~/lib/resource/zoneResource'
+import type { FogParams, LightingParams, PointLightParams } from './lights'
 import type { EnvironmentManager } from './environmentManager'
+import type { ZonePointLightProvider } from './zonePointLightProvider'
 
 export interface ZoneSceneData {
   readonly zoneResource: ZoneResource
@@ -74,6 +73,7 @@ export class ZoneRenderer {
       const objGroup = new Group()
       objGroup.name = zoneObj.objectId
       objGroup.userData.environmentLink = zoneObj.environmentLink ?? null
+      objGroup.userData.zoneObject = zoneObj
 
       // Apply zone object transform: translate * rotateZYX * scale
       objGroup.position.set(zoneObj.position.x, zoneObj.position.y, zoneObj.position.z)
@@ -91,13 +91,13 @@ export class ZoneRenderer {
         } else {
           const cleanName = buffer.textureName.replace(/\0/g, '').trim()
           if (cleanName.length === 0) {
-            // Empty texture name — geometry that depends on a texture to be visible.
-            // Rendering with gray fallback would obscure real textured ground.
+            // Empty texture name — includes water surfaces and other untextured geometry.
+            // Render with gray fallback (matching Kotlin's getTextureOrDefault behavior).
             emptyNameSkipped++
-            continue
+          } else {
+            texturesMissing++
+            missingTextureNames.add(cleanName)
           }
-          texturesMissing++
-          missingTextureNames.add(cleanName)
         }
 
         const geometry = buildGeometryForZoneMesh(buffer)
@@ -111,6 +111,7 @@ export class ZoneRenderer {
             positionBlendWeight: { value: 0.0 },
             diffuseTexture: { value: diffuseTexture },
             discardThreshold: { value: buffer.renderState.discardThreshold ?? 0.0 },
+            blendEnabled: { value: buffer.renderState.blendEnabled ? 1.0 : 0.0 },
             colorMask: { value: new Vector4(1, 1, 1, 1) },
             ambientLightColor: { value: new Vector4(0.6, 0.6, 0.6, 1) },
             ...buildDiffuseLightUniforms(),
@@ -163,7 +164,7 @@ export class ZoneRenderer {
       console.info(`[ZoneRenderer] Available zone textures (${available.length}):`, available)
     }
     if (emptyNameSkipped > 0) {
-      console.info(`[ZoneRenderer] Skipped ${emptyNameSkipped} empty-name mesh buffers (no texture assigned)`)
+      console.info(`[ZoneRenderer] ${emptyNameSkipped} empty-name mesh buffers rendered with gray fallback (water, etc.)`)
     }
   }
 
@@ -182,17 +183,28 @@ export class ZoneRenderer {
   /**
    * Apply per-object environment lighting using the EnvironmentManager.
    * Each zone object group may have a different environmentLink (e.g., indoor vs outdoor).
+   * Optionally applies per-object point lights if a provider is given.
    */
-  applyLightingFromEnvManager(envManager: EnvironmentManager, timeMinutes: number): void {
+  applyLightingFromEnvManager(
+    envManager: EnvironmentManager,
+    timeMinutes: number,
+    pointLightProvider?: ZonePointLightProvider | null,
+  ): void {
     for (const group of this.meshGroups) {
       const envLink = group.userData.environmentLink as string | null
       const { lighting, fog } = envManager.resolveTerrainForObject(envLink, timeMinutes)
+
+      const zoneObj = group.userData.zoneObject as ZoneObject | undefined
+      const pointLights = (pointLightProvider && zoneObj)
+        ? pointLightProvider.resolveForZoneObject(zoneObj)
+        : []
 
       group.traverse((child) => {
         if (!(child instanceof Mesh)) return
         const material = child.material
         if (!(material instanceof ShaderMaterial)) return
         applyLightingToMaterial(material.uniforms, lighting, fog)
+        applyPointLightsToMaterial(material.uniforms, pointLights)
       })
     }
   }
@@ -322,17 +334,12 @@ function applyZYXRotation(group: Group, rotation: { x: number, y: number, z: num
 /**
  * Determine the Three.js face culling side for a zone mesh buffer.
  *
- * Back-face culling: when enabled, only front faces render (FrontSide).
- * Mirrored winding: if the object scale product is negative, the object is
- * mirrored and front-face winding flips -- use BackSide to compensate.
- * When culling is disabled, render both sides (DoubleSide).
+ * Always use DoubleSide to render both faces. FFXI zone meshes have
+ * inconsistent winding across objects, and the viewer doesn't need
+ * the minor GPU savings from backface culling.
  */
-function determineSide(renderState: import('~/lib/resource/datResource').MeshRenderState, isMirrored: boolean): Side {
-  if (!renderState.useBackFaceCulling) {
-    return DoubleSide
-  }
-  // Mirrored objects flip winding: CW becomes CCW, so cull the opposite side
-  return isMirrored ? BackSide : FrontSide
+function determineSide(_renderState: import('~/lib/resource/datResource').MeshRenderState, _isMirrored: boolean): Side {
+  return DoubleSide
 }
 
 // ─── Lighting Application ────────────────────────────────────────────────────
@@ -352,6 +359,28 @@ function applyLightingToMaterial(u: UniformMap, lighting: LightingParams, fog: F
   setFloat(u, 'uFog.fogNearDist', clampFog(fog.start))
   setFloat(u, 'uFog.fogFarDist', clampFog(fog.end))
   setVec4(u, 'uFog.fogColor', fog.color.r, fog.color.g, fog.color.b, fog.color.a)
+}
+
+/**
+ * Apply per-object point light uniforms.
+ * Matches Kotlin's GLDrawer.drawXim() lines 156-158:
+ * unused slots get zeroed (no-op) values.
+ */
+function applyPointLightsToMaterial(u: UniformMap, pointLights: readonly PointLightParams[]): void {
+  for (let i = 0; i < POINT_LIGHT_COUNT; i++) {
+    const pl = pointLights[i]
+    if (pl) {
+      setVec3(u, `pointLights[${i}].position`, pl.position.x, pl.position.y, pl.position.z)
+      setVec4(u, `pointLights[${i}].color`, pl.color.r, pl.color.g, pl.color.b, pl.color.a)
+      setFloat(u, `pointLights[${i}].range`, pl.range)
+      setVec3(u, `pointLights[${i}].attenuation`, 0, 0, pl.attenuationQuad)
+    } else {
+      setVec3(u, `pointLights[${i}].position`, 0, 0, 0)
+      setVec4(u, `pointLights[${i}].color`, 0, 0, 0, 0)
+      setFloat(u, `pointLights[${i}].range`, 0)
+      setVec3(u, `pointLights[${i}].attenuation`, 1, 0, 0)
+    }
+  }
 }
 
 // ─── Uniform Helpers ─────────────────────────────────────────────────────────

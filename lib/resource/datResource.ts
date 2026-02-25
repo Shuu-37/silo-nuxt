@@ -804,9 +804,14 @@ class ZoneSectionPlaceholder implements DatEntry {
   readonly id = DatId.zero
 }
 
+class EffectSectionPlaceholder implements DatEntry {
+  readonly id = DatId.zero
+}
+
 export const SectionTypes = {
   S00_End: { code: 0x00, resourceType: NotImplementedResource },
   S01_Directory: { code: 0x01, resourceType: DirectoryResource },
+  S05_Effect: { code: 0x05, resourceType: EffectSectionPlaceholder },
   S1C_ZoneDef: { code: 0x1c, resourceType: ZoneSectionPlaceholder },
   S20_Texture: { code: 0x20, resourceType: TextureResource },
   S25_WeightedMesh: { code: 0x25, resourceType: WeightedMeshResource },

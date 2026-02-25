@@ -166,6 +166,83 @@
         </div>
       </details>
 
+      <!-- Point Lights -->
+      <details class="panel-section">
+        <summary class="section-heading">Point Lights</summary>
+        <div class="section-grid">
+          <div v-for="(light, idx) in sceneLights" :key="idx" class="point-light-card">
+            <div class="point-light-header">
+              <span class="point-light-label">Light {{ idx + 1 }}</span>
+              <div class="point-light-actions">
+                <label class="point-light-debug-toggle" title="Show range sphere">
+                  <input v-model="light.debug" type="checkbox" @change="syncSceneLights" />
+                  <span>Debug</span>
+                </label>
+                <button class="point-light-remove" type="button" @click="removeSceneLight(idx)">x</button>
+              </div>
+            </div>
+            <div class="point-light-row">
+              <label class="label">X</label>
+              <input
+                v-model.number="light.x"
+                type="number"
+                step="1"
+                class="point-light-input"
+                @change="syncSceneLights"
+              />
+              <label class="label">Y</label>
+              <input
+                v-model.number="light.y"
+                type="number"
+                step="1"
+                class="point-light-input"
+                @change="syncSceneLights"
+              />
+              <label class="label">Z</label>
+              <input
+                v-model.number="light.z"
+                type="number"
+                step="1"
+                class="point-light-input"
+                @change="syncSceneLights"
+              />
+            </div>
+            <div class="point-light-row">
+              <label class="label">Color</label>
+              <input
+                v-model="light.hex"
+                type="color"
+                class="point-light-color"
+                @input="syncSceneLights"
+              />
+              <label class="label">Range</label>
+              <input
+                v-model.number="light.range"
+                type="number"
+                min="1"
+                max="500"
+                step="5"
+                class="point-light-input"
+                @change="syncSceneLights"
+              />
+              <label class="label">Atten</label>
+              <input
+                v-model.number="light.atten"
+                type="number"
+                min="0.001"
+                max="1"
+                step="0.005"
+                class="point-light-input"
+                @change="syncSceneLights"
+              />
+            </div>
+          </div>
+          <button type="button" class="add-light-btn" @click="addSceneLight">
+            + Add Light
+          </button>
+        </div>
+      </details>
+
       <!-- Equipment -->
       <details class="panel-section">
         <summary class="section-heading">Equipment</summary>
@@ -299,6 +376,7 @@ import { ThreeRenderer } from '~/lib/renderer/threeRenderer'
 import { ZoneRenderer } from '~/lib/renderer/zoneRenderer'
 import { EnvironmentManager } from '~/lib/renderer/environmentManager'
 import { SkyboxRenderer } from '~/lib/renderer/skyboxRenderer'
+import { ZonePointLightProvider } from '~/lib/renderer/zonePointLightProvider'
 import { Actor, ActorId, type ActorState } from '~/lib/runtime/actor'
 import { NoOpActorController } from '~/lib/runtime/actorController'
 import { ActorModel, SlotVisibilityOverride, type RuntimeActor } from '~/lib/runtime/actorModel'
@@ -334,6 +412,112 @@ const timeOfDayLabel = computed(() => {
   const m = Math.floor(timeOfDayMinutes.value % 60)
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
 })
+
+// --- Scene point lights (user-placed) ---
+interface SceneLightEntry {
+  x: number
+  y: number
+  z: number
+  hex: string
+  range: number
+  atten: number
+  debug: boolean
+}
+
+const sceneLights = reactive<SceneLightEntry[]>([])
+
+function hexToRgb(hex: string): { r: number, g: number, b: number } {
+  const n = parseInt(hex.replace('#', ''), 16)
+  return { r: ((n >> 16) & 0xff) / 255, g: ((n >> 8) & 0xff) / 255, b: (n & 0xff) / 255 }
+}
+
+const lightDebugSpheres: (Mesh | null)[] = []
+
+function addSceneLight(): void {
+  const pos = actor?.displayPosition ?? { x: 0, y: 0, z: 0 }
+  sceneLights.push({
+    x: Math.round(pos.x),
+    y: Math.round(pos.y),
+    z: Math.round(pos.z),
+    hex: '#ffcc66',
+    range: 50,
+    atten: 0.02,
+    debug: false,
+  })
+  lightDebugSpheres.push(null)
+  syncSceneLights()
+}
+
+function removeSceneLight(idx: number): void {
+  removeLightDebugSphere(idx)
+  sceneLights.splice(idx, 1)
+  lightDebugSpheres.splice(idx, 1)
+  syncSceneLights()
+}
+
+function syncSceneLights(): void {
+  if (!zonePointLightProvider) return
+  zonePointLightProvider.clearSceneLights()
+  for (let i = 0; i < sceneLights.length; i++) {
+    const sl = sceneLights[i]!
+    const rgb = hexToRgb(sl.hex)
+    zonePointLightProvider.addSceneLight({
+      position: { x: sl.x, y: sl.y, z: sl.z },
+      color: { r: rgb.r, g: rgb.g, b: rgb.b, a: 1 },
+      range: sl.range,
+      attenuationQuad: sl.atten,
+    })
+    syncLightDebugSphere(i, sl)
+  }
+  // Re-apply lighting so the new lights take effect immediately
+  if (renderer) {
+    applyEnvironment(renderer.scene)
+  }
+}
+
+function syncLightDebugSphere(idx: number, sl: SceneLightEntry): void {
+  if (!renderer) return
+  const scene = renderer.scene
+  if (!sl.debug) {
+    removeLightDebugSphere(idx)
+    return
+  }
+
+  const color = parseInt(sl.hex.replace('#', ''), 16)
+  let sphere = lightDebugSpheres[idx]
+  if (sphere) {
+    sphere.position.set(sl.x, sl.y, sl.z)
+    sphere.scale.setScalar(sl.range)
+    ;(sphere.material as MeshBasicMaterial).color.set(color)
+  } else {
+    const geo = new SphereGeometry(1, 16, 12)
+    const mat = new MeshBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.12, wireframe: true })
+    sphere = new Mesh(geo, mat)
+    sphere.renderOrder = 9998
+    sphere.frustumCulled = false
+    sphere.position.set(sl.x, sl.y, sl.z)
+    sphere.scale.setScalar(sl.range)
+    scene.add(sphere)
+    lightDebugSpheres[idx] = sphere
+  }
+}
+
+function removeLightDebugSphere(idx: number): void {
+  const sphere = lightDebugSpheres[idx]
+  if (sphere && renderer) {
+    renderer.scene.remove(sphere)
+    sphere.geometry.dispose()
+    ;(sphere.material as MeshBasicMaterial).dispose()
+    lightDebugSpheres[idx] = null
+  }
+}
+
+function disposeAllLightDebugSpheres(): void {
+  for (let i = lightDebugSpheres.length - 1; i >= 0; i--) {
+    removeLightDebugSphere(i)
+  }
+  lightDebugSpheres.length = 0
+}
 
 // --- Character creation selectors ---
 type Race = 'Hume' | 'Elvaan' | 'Tarutaru' | 'Mithra' | 'Galka'
@@ -565,6 +749,7 @@ let initializedRaceName: string | null = null
 let orbitControls: OrbitControlsHandle | null = null
 let zoneRenderer: ZoneRenderer | null = null
 let skyboxRenderer: SkyboxRenderer | null = null
+let zonePointLightProvider: ZonePointLightProvider | null = null
 const envManager = new EnvironmentManager()
 let zoneDecryptInitialized = false
 let currentZoneId: number | null = null
@@ -618,6 +803,7 @@ function disposeScene(): void {
 
   if (renderer) {
     removeDebugMarker(renderer.scene)
+    disposeAllLightDebugSpheres()
     if (zoneRenderer) {
       zoneRenderer.dispose(renderer.scene)
     }
@@ -627,6 +813,7 @@ function disposeScene(): void {
   }
   zoneRenderer = null
   skyboxRenderer = null
+  zonePointLightProvider = null
   currentZoneId = null
   currentCollisionMap = null
   zoneModelLighting = null
@@ -827,9 +1014,9 @@ function applyEnvironment(scene: ThreeScene): void {
   const time = timeOfDayMinutes.value
   const env = envManager.resolve(time)
 
-  // Per-object terrain lighting
+  // Per-object terrain lighting (with point lights)
   if (zoneRenderer) {
-    zoneRenderer.applyLightingFromEnvManager(envManager, time)
+    zoneRenderer.applyLightingFromEnvManager(envManager, time, zonePointLightProvider)
   }
 
   // Model lighting for the actor
@@ -919,6 +1106,9 @@ async function loadZone(
   // Initialize environment manager from zone directory tree
   envManager.init(zoneDirectory)
   console.info(`[zone] Environment manager initialized (envIds: ${envManager.getAvailableEnvIds().join(', ')})`)
+
+  // Initialize point light provider from zone effects
+  zonePointLightProvider = new ZonePointLightProvider(zoneDirectory, zoneResource)
 
   // Initialize skybox renderer
   if (!skyboxRenderer) {
@@ -1139,10 +1329,12 @@ async function loadScene(): Promise<void> {
     actor.update(0)
 
     runtimeScene = new RuntimeScene({
-      resolveActorLighting: () => ({
+      resolveActorLighting: (a) => ({
         lightingParams: zoneModelLighting ?? noOpLighting,
         fogParams: zoneModelFog ?? noOpFog,
-        pointLights: [],
+        pointLights: zonePointLightProvider
+          ? zonePointLightProvider.resolveForActorAt(a.displayPosition)
+          : [],
       }),
     })
 
@@ -1311,7 +1503,7 @@ onUnmounted(() => {
 
 <style scoped>
 .viewer-shell {
-  min-height: 100vh;
+  min-height: calc(100vh - 44px);
   padding: clamp(1rem, 2vw, 2rem);
   display: grid;
   gap: 1rem;
@@ -1332,7 +1524,7 @@ onUnmounted(() => {
   display: grid;
   gap: 0.75rem;
   align-content: start;
-  max-height: 100vh;
+  max-height: calc(100vh - 44px);
   overflow-y: auto;
 }
 
@@ -1598,6 +1790,115 @@ button:disabled {
 
 .ground-miss {
   color: rgba(255, 130, 100, 0.85);
+}
+
+.point-light-card {
+  border: 1px solid #d6e1dd;
+  border-radius: 10px;
+  padding: 0.45rem;
+  background: rgba(247, 251, 250, 0.72);
+  display: grid;
+  gap: 0.35rem;
+  overflow: hidden;
+}
+
+.point-light-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.point-light-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #5b6d6f;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.point-light-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.point-light-debug-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.65rem;
+  color: #5b6d6f;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.point-light-debug-toggle input {
+  accent-color: #5e9aa4;
+}
+
+.point-light-remove {
+  border: none;
+  background: none;
+  color: #992d2d;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  line-height: 1;
+}
+
+.point-light-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr auto 1fr;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.point-light-row .label {
+  margin: 0;
+  min-width: auto;
+  font-size: 0.65rem;
+}
+
+.point-light-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #8aa4a6;
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  background: rgba(252, 255, 255, 0.92);
+  color: #233537;
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.78rem;
+  text-align: right;
+  box-sizing: border-box;
+}
+
+.point-light-color {
+  width: 100%;
+  height: 1.5rem;
+  border: 1px solid #8aa4a6;
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.add-light-btn {
+  border: 1px dashed #8aa4a6;
+  border-radius: 10px;
+  background: rgba(252, 255, 255, 0.5);
+  color: #5b6d6f;
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.add-light-btn:hover {
+  background: rgba(252, 255, 255, 0.8);
 }
 
 canvas {
