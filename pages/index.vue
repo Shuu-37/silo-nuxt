@@ -243,6 +243,69 @@
         </div>
       </details>
 
+      <!-- Props -->
+      <details class="panel-section" open>
+        <summary class="section-heading">Props</summary>
+        <div class="section-grid">
+          <div class="prop-dat-label"><code>{{ propDatLabel }}</code></div>
+          <div
+            v-for="(prop, idx) in propPlacements"
+            :key="idx"
+            class="prop-card"
+            :class="{ 'prop-selected': selectedPropIndex === idx }"
+            @click="selectedPropIndex = idx"
+          >
+            <div class="prop-header">
+              <span class="prop-label">Prop {{ idx + 1 }}</span>
+              <button class="prop-remove" type="button" @click.stop="removeProp(idx)">x</button>
+            </div>
+            <div class="prop-row">
+              <label class="label">X</label>
+              <input
+                v-model.number="prop.x"
+                type="number"
+                step="0.5"
+                class="prop-input"
+                @change="onPropChange(idx)"
+                @click.stop
+              />
+              <label class="label">Y</label>
+              <input
+                v-model.number="prop.y"
+                type="number"
+                step="0.5"
+                class="prop-input"
+                @change="onPropChange(idx)"
+                @click.stop
+              />
+              <label class="label">Z</label>
+              <input
+                v-model.number="prop.z"
+                type="number"
+                step="0.5"
+                class="prop-input"
+                @change="onPropChange(idx)"
+                @click.stop
+              />
+            </div>
+            <div class="prop-row">
+              <label class="label">Rot</label>
+              <input
+                v-model.number="prop.rotation"
+                type="number"
+                step="0.1"
+                class="prop-input"
+                @change="onPropChange(idx)"
+                @click.stop
+              />
+            </div>
+          </div>
+          <button type="button" class="add-prop-btn" @click="addProp">
+            + Add Prop
+          </button>
+        </div>
+      </details>
+
       <!-- Equipment -->
       <details class="panel-section">
         <summary class="section-heading">Equipment</summary>
@@ -314,7 +377,7 @@
     </section>
 
     <section class="canvas-wrap">
-      <canvas ref="canvasRef" />
+      <canvas ref="canvasRef" @click="onCanvasClick" />
       <div class="canvas-overlay">
         <div class="orbit-readout">
           <span>Orbit {{ orbitState.azimuth }}°</span>
@@ -347,7 +410,9 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   Mesh,
   MeshBasicMaterial,
+  Raycaster,
   SphereGeometry,
+  Vector2,
   type Scene as ThreeScene,
 } from 'three'
 
@@ -395,6 +460,7 @@ import {
 import { ItemModelSlot as RuntimeItemModelSlot, type Model } from '~/lib/runtime/model'
 import { collectByTypeRecursive } from '~/lib/runtime/resourceTree'
 import { RuntimeScene } from '~/lib/runtime/scene'
+import { NpcModel } from '~/lib/runtime/npcModel'
 import { LoopParams, TransitionParams } from '~/lib/runtime/skeletonAnimator'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -755,6 +821,165 @@ let zoneDecryptInitialized = false
 let currentZoneId: number | null = null
 let currentCollisionMap: import('~/lib/resource/zoneResource').CollisionMap | null = null
 let debugMarker: Mesh | null = null
+let propActors: Actor[] = []
+let propDatRoot: DirectoryResource | null = null
+
+// Nation index → DAT path (one prop type per nation)
+const NATION_PROP_DAT: Record<number, string> = {
+  0: 'ROM/7/95.DAT', // San d'Oria
+  1: 'ROM/7/96.DAT', // Bastok
+  2: 'ROM/7/97.DAT', // Windurst
+}
+
+// --- Prop placement state ---
+interface PropPlacement {
+  x: number
+  y: number
+  z: number
+  rotation: number
+}
+
+const PROP_STORAGE_KEY = 'silo-prop-placements'
+const selectedPropIndex = ref(-1)
+const propPlacements = reactive<PropPlacement[]>([])
+
+const propDatLabel = computed(() => {
+  const p = NATION_PROP_DAT[selectedNation.value] ?? ''
+  return p.replace('.DAT', '')
+})
+
+function loadSavedPropPlacements(nationIndex: number): PropPlacement[] {
+  try {
+    const raw = localStorage.getItem(PROP_STORAGE_KEY)
+    if (raw) {
+      const data = JSON.parse(raw)
+      const saved = data[nationIndex]
+      if (Array.isArray(saved)) return saved
+    }
+  } catch { /* ignore */ }
+  return []
+}
+
+function savePropPlacements(nationIndex: number): void {
+  try {
+    const raw = localStorage.getItem(PROP_STORAGE_KEY)
+    const data = raw ? JSON.parse(raw) : {}
+    data[nationIndex] = propPlacements.map((p) => ({ ...p }))
+    localStorage.setItem(PROP_STORAGE_KEY, JSON.stringify(data))
+  } catch { /* ignore */ }
+}
+
+function onPropChange(idx: number): void {
+  const pa = propActors[idx]
+  if (pa) {
+    const placement = propPlacements[idx]!
+    pa.state.position.x = placement.x
+    pa.state.position.y = placement.y
+    pa.state.position.z = placement.z
+    pa.state.rotation = placement.rotation
+    pa.syncFromState()
+  }
+  savePropPlacements(selectedNation.value)
+}
+
+function addProp(): void {
+  if (!propDatRoot) return
+  const pos = actor?.displayPosition ?? { x: 0, y: 0, z: 0 }
+  const placement: PropPlacement = {
+    x: Math.round(pos.x * 2) / 2,
+    y: Math.round(pos.y * 2) / 2,
+    z: Math.round(pos.z * 2) / 2,
+    rotation: 0,
+  }
+  propPlacements.push(placement)
+  spawnPropActor(propDatRoot, placement, propActors.length)
+  selectedPropIndex.value = propPlacements.length - 1
+  savePropPlacements(selectedNation.value)
+}
+
+function removeProp(idx: number): void {
+  propPlacements.splice(idx, 1)
+  propActors.splice(idx, 1)
+  if (selectedPropIndex.value === idx) selectedPropIndex.value = -1
+  else if (selectedPropIndex.value > idx) selectedPropIndex.value--
+  savePropPlacements(selectedNation.value)
+}
+
+function spawnPropActor(root: DirectoryResource, placement: PropPlacement, index: number): void {
+  const propModel = new NpcModel(root)
+  const propState: ActorState = {
+    id: new ActorId(100 + index),
+    position: { x: placement.x, y: placement.y, z: placement.z },
+    velocity: { x: 0, y: 0, z: 0 },
+    rotation: placement.rotation,
+    visible: true,
+    movementSpeed: 0,
+  }
+  const rta: RuntimeActor = {
+    isDisplayEngagedOrEngaging: () => false,
+    getMount: () => null,
+  }
+  const pa = new Actor(propState, new NoOpActorController(), () => null)
+  pa.displayFacingDir = placement.rotation
+  const pam = new ActorModel(rta, propModel)
+  pa.actorModel = pam
+
+  // Try idle animation
+  const animDirs = propModel.getAnimationDirectories()
+  const animIds: string[] = []
+  for (const dir of animDirs) {
+    for (const subDir of dir.getSubDirectories()) {
+      const id = subDir.id.id
+      if (!animIds.includes(id)) animIds.push(id)
+    }
+  }
+  const idleAnim = animIds.find(id => id.startsWith('idl'))
+  if (idleAnim) {
+    pam.setSkeletonAnimation(
+      new DatId(idleAnim),
+      animDirs,
+      LoopParams.lowPriorityLoop(),
+      new TransitionParams(0, 0),
+    )
+  }
+
+  pa.update(0)
+  propActors.push(pa)
+}
+
+function onCanvasClick(event: MouseEvent): void {
+  if (!renderer || !canvasRef.value || propActors.length === 0) return
+
+  const rect = canvasRef.value.getBoundingClientRect()
+  const mouse = new Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  )
+
+  const raycaster = new Raycaster()
+  raycaster.setFromCamera(mouse, renderer.camera)
+  const intersections = raycaster.intersectObjects(renderer.scene.children, true)
+
+  for (const hit of intersections) {
+    let current = hit.object
+    while (current.parent && current.parent !== renderer.scene) {
+      current = current.parent
+    }
+    if (!current.parent) continue
+
+    const gp = current.position
+    for (let i = 0; i < propActors.length; i++) {
+      const dp = propActors[i]!.displayPosition
+      const dist = Math.hypot(gp.x - dp.x, gp.y - dp.y, gp.z - dp.z)
+      if (dist < 0.5) {
+        selectedPropIndex.value = i
+        return
+      }
+    }
+  }
+
+  selectedPropIndex.value = -1
+}
 
 // Zone DAT loader (parses with zoneResource: true)
 const zoneDatLoader = new DatLoader<DirectoryResource>({
@@ -818,6 +1043,8 @@ function disposeScene(): void {
   currentCollisionMap = null
   zoneModelLighting = null
   zoneModelFog = null
+  propActors = []
+  propDatRoot = null
 
   orbitControls?.dispose()
   orbitControls = null
@@ -1360,6 +1587,26 @@ async function loadScene(): Promise<void> {
       // Continue without zone -- character renders at origin
     }
 
+    // Load nation prop DAT and restore saved instances
+    propActors = []
+    propDatRoot = null
+    selectedPropIndex.value = -1
+    const saved = loadSavedPropPlacements(selectedNation.value)
+    propPlacements.splice(0, propPlacements.length, ...saved)
+
+    const propDatPath = NATION_PROP_DAT[selectedNation.value]
+    if (propDatPath) {
+      try {
+        propDatRoot = await datLoader.load(propDatPath)
+        for (let i = 0; i < propPlacements.length; i++) {
+          spawnPropActor(propDatRoot, propPlacements[i]!, i)
+        }
+        console.info(`[props] Loaded ${propDatPath}, restored ${propPlacements.length} instances`)
+      } catch (propError) {
+        console.warn('[props] Failed to load prop DAT:', propError)
+      }
+    }
+
     const skeletonHeight = actorModel.getSkeleton()?.resource.size.y ?? 1.75
     const frame = getXiCameraFrame(skeletonHeight)
 
@@ -1398,15 +1645,17 @@ async function loadScene(): Promise<void> {
       const elapsedFrames = elapsedMs / (1000 / 60)
 
       actor.update(elapsedFrames)
+      for (const pa of propActors) pa.update(elapsedFrames)
 
-      const commands = runtimeScene.buildDrawCommands([actor], {
+      const allActors = [actor, ...propActors]
+      const commands = runtimeScene.buildDrawCommands(allActors, {
         cameraPosition: {
           x: renderer.camera.position.x,
           y: renderer.camera.position.y,
           z: renderer.camera.position.z,
         },
         maxDistance: 2000,
-        maxVisible: 1,
+        maxVisible: allActors.length,
       })
 
       // Update zone wind animation (foliage sway)
@@ -1898,6 +2147,99 @@ button:disabled {
 }
 
 .add-light-btn:hover {
+  background: rgba(252, 255, 255, 0.8);
+}
+
+.prop-dat-label code {
+  font-size: 0.72rem;
+  color: #587171;
+}
+
+.prop-card {
+  border: 1px solid #d6e1dd;
+  border-radius: 10px;
+  padding: 0.45rem;
+  background: rgba(247, 251, 250, 0.72);
+  display: grid;
+  gap: 0.35rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.prop-card:hover {
+  border-color: #8aa4a6;
+}
+
+.prop-selected {
+  border-color: #5e9aa4;
+  background: rgba(94, 154, 164, 0.12);
+}
+
+.prop-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.prop-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #5b6d6f;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.prop-remove {
+  border: none;
+  background: none;
+  color: #992d2d;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0 0.3rem;
+  line-height: 1;
+}
+
+.prop-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr auto 1fr;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.prop-row .label {
+  margin: 0;
+  min-width: auto;
+  font-size: 0.65rem;
+}
+
+.prop-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #8aa4a6;
+  border-radius: 6px;
+  padding: 0.2rem 0.3rem;
+  background: rgba(252, 255, 255, 0.92);
+  color: #233537;
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.78rem;
+  text-align: right;
+  box-sizing: border-box;
+}
+
+.add-prop-btn {
+  border: 1px dashed #8aa4a6;
+  border-radius: 10px;
+  background: rgba(252, 255, 255, 0.5);
+  color: #5b6d6f;
+  font-family: inherit;
+  font-size: 0.85rem;
+  padding: 0.4rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.add-prop-btn:hover {
   background: rgba(252, 255, 255, 0.8);
 }
 

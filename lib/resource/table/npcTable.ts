@@ -6,14 +6,14 @@ import type { FileTableManager } from './fTable'
  * corresponding to different FFXI expansion eras.
  */
 export const NpcModelRanges = {
-  /** Base game through Treasures of Aht Urhgan (model IDs 0-1499) */
+  /** Base / CoP / ToAU — ROM1-ROM3 (model IDs 0-1499) */
   base: { min: 0x000, max: 0x5DB, offset: 0x514, label: 'Base / CoP / ToAU' },
-  /** Wings of the Goddess through Seekers of Adoulin+ (model IDs 1500-2999) */
-  wotg: { min: 0x5DC, max: 0xBB7, offset: 0xC477, label: 'WotG / SoA+' },
+  /** WotG / SoA / RoV — ROM5-ROM7 (model IDs 1500-2999) */
+  wotg: { min: 0x5DC, max: 0xBB7, offset: 0xC477, label: 'WotG / SoA / RoV' },
   /** Trust (Alter Ego) models (model IDs 3000-3192) */
   trust: { min: 0xBB8, max: 0xC78, offset: 0x17A8B, label: 'Trusts' },
-  /** Newest models -- speculated range (model IDs 3193+) */
-  newest: { min: 0xC79, max: 0xFFF, offset: 0x180F2, label: 'Newest' },
+  /** VR / Newest — ROM8-ROM9 (model IDs 3193+) */
+  newest: { min: 0xC79, max: 0xFFF, offset: 0x180F2, label: 'VR / Newest' },
 } as const
 
 /**

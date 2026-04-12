@@ -35,18 +35,18 @@
           <summary class="section-heading">Browse</summary>
           <div class="section-grid">
             <div>
-              <label class="label" for="range-select">Range</label>
+              <label class="label" for="model-expansion">Expansion</label>
               <select
-                id="range-select"
-                v-model="selectedRange"
+                id="model-expansion"
+                v-model="selectedModelExpansion"
                 :disabled="!isReady"
               >
                 <option
-                  v-for="range in rangeOptions"
-                  :key="range.key"
-                  :value="range.key"
+                  v-for="opt in expansionFilterOptions"
+                  :key="opt.key"
+                  :value="opt.key"
                 >
-                  {{ range.label }} ({{ range.min }}-{{ range.max }})
+                  {{ opt.label }}
                 </option>
               </select>
             </div>
@@ -169,6 +169,9 @@
               >
                 <span class="model-id-row">
                   <span class="model-id">{{ formatModelId(m.id) }}</span>
+                  <span class="exp-badge" :class="`exp-${m.expansion.toLowerCase()}`">
+                    {{ m.expansion }}
+                  </span>
                   <span
                     v-if="modelCategories.has(m.id)"
                     class="type-badge"
@@ -259,6 +262,22 @@
           <summary class="section-heading">Browse</summary>
           <div class="section-grid">
             <div>
+              <label class="label" for="zone-expansion">Expansion</label>
+              <select
+                id="zone-expansion"
+                v-model="selectedExpansionFilter"
+                :disabled="!isReady"
+              >
+                <option
+                  v-for="opt in expansionFilterOptions"
+                  :key="opt.key"
+                  :value="opt.key"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+            <div>
               <label class="label" for="zone-search">Filter</label>
               <input
                 id="zone-search"
@@ -298,7 +317,12 @@
                 :class="{ active: zone.id === currentZoneId }"
                 @click="loadZoneById(zone.id)"
               >
-                <span class="model-id">{{ zone.id }}</span>
+                <span class="model-id-row">
+                  <span class="model-id">{{ zone.id }}</span>
+                  <span class="exp-badge" :class="`exp-${zone.expansion.toLowerCase()}`">
+                    {{ zone.expansion }}
+                  </span>
+                </span>
                 <span class="model-path">{{ zone.name }}</span>
               </div>
             </div>
@@ -322,6 +346,17 @@
               <div class="info-row">
                 <span class="info-key">Name</span>
                 <code class="info-val">{{ currentZoneName ?? '--' }}</code>
+              </div>
+              <div class="info-row">
+                <span class="info-key">Era</span>
+                <code class="info-val">
+                  <span
+                    v-if="currentZoneExpansion"
+                    class="exp-badge"
+                    :class="`exp-${currentZoneExpansion.toLowerCase()}`"
+                  >{{ currentZoneExpansion }}</span>
+                  <template v-else>--</template>
+                </code>
               </div>
               <div class="info-row">
                 <span class="info-key">Path</span>
@@ -508,7 +543,7 @@ const currentModelId = ref<number | null>(null)
 const currentModelPath = ref<string | null>(null)
 const modelIdInput = ref('')
 const modelSearch = ref('')
-const selectedRange = ref<string>('all')
+const selectedModelExpansion = ref<string>('all')
 const currentPage = ref(0)
 const selectedTypeFilter = ref<string>('all')
 
@@ -519,6 +554,7 @@ type ModelCategory = 'prop' | 'npc' | 'flying' | 'unknown'
 interface ModelEntry {
   readonly id: number
   readonly path: string
+  readonly expansion: string
 }
 
 // ─── Model Classification ────────────────────────────────────────────────────
@@ -585,7 +621,6 @@ async function startClassification(): Promise<void> {
     })
   }
 
-  const rangeKey = selectedRange.value
   const entries = allModels.value
   const existing = modelCategories.value
 
@@ -629,7 +664,7 @@ async function startClassification(): Promise<void> {
     modelCategories.value = new Map(existing)
   }
 
-  saveCachedCategories(rangeKey, existing)
+  saveCachedCategories('all', existing)
   isClassifying.value = false
   classifyAbort = null
 }
@@ -657,54 +692,42 @@ const typeFilterOptions = [
   { key: 'unknown', label: 'Unclassified' },
 ]
 
-const rangeOptions = [
-  { key: 'all', label: 'All', min: NpcModelRanges.base.min, max: NpcModelRanges.newest.max },
-  { key: 'base', label: 'Base / CoP / ToAU', min: NpcModelRanges.base.min, max: NpcModelRanges.base.max },
-  { key: 'wotg', label: 'WotG / SoA+', min: NpcModelRanges.wotg.min, max: NpcModelRanges.wotg.max },
-  { key: 'trust', label: 'Trusts', min: NpcModelRanges.trust.min, max: NpcModelRanges.trust.max },
-  { key: 'newest', label: 'Newest', min: NpcModelRanges.newest.min, max: NpcModelRanges.newest.max },
-]
-
-const activeRange = computed(() => {
-  const opt = rangeOptions.find(r => r.key === selectedRange.value)
-  return opt ?? rangeOptions[0]!
-})
-
 const allModels = ref<ModelEntry[]>([])
 
-function scanRange(): void {
+function scanAllModels(): void {
   if (!resourceTableRuntime) { return }
   isScanning.value = true
 
-  // Cancel any in-flight classification from the previous range
   cancelClassification()
 
-  const range = activeRange.value
   const entries: ModelEntry[] = []
   const ftm = resourceTableRuntime.fileTableManager
 
-  for (let id = range.min; id <= range.max; id += 1) {
+  for (let id = NpcModelRanges.base.min; id <= NpcModelRanges.newest.max; id += 1) {
     const path = getNpcModelPath(id, ftm)
     if (path !== null) {
-      entries.push({ id, path })
+      entries.push({ id, path, expansion: expansionFromPath(path) })
     }
   }
 
   allModels.value = entries
   currentPage.value = 0
-  selectedTypeFilter.value = 'all'
   isScanning.value = false
 
-  // Load cached classification data for this range
-  modelCategories.value = loadCachedCategories(selectedRange.value)
+  modelCategories.value = loadCachedCategories('all')
 }
+
+const expansionFilteredModels = computed(() => {
+  const expKey = selectedModelExpansion.value
+  if (expKey === 'all') { return allModels.value }
+  return allModels.value.filter(m => m.expansion === expKey)
+})
 
 const textFilteredModels = computed(() => {
   const q = modelSearch.value.trim().toLowerCase()
-  if (!q) { return allModels.value }
+  if (!q) { return expansionFilteredModels.value }
 
-  // Allow searching by hex ID (e.g. "5dc"), decimal ID, or path fragment
-  return allModels.value.filter(m => {
+  return expansionFilteredModels.value.filter(m => {
     const hexId = m.id.toString(16).toLowerCase()
     const decId = m.id.toString(10)
     if (hexId.includes(q) || decId.includes(q)) { return true }
@@ -723,8 +746,8 @@ const filteredModels = computed(() => {
   return textFilteredModels.value.filter(m => cats.get(m.id) === typeKey)
 })
 
-// Reset page when search or type filter changes
-watch([modelSearch, selectedTypeFilter], () => {
+// Reset page when any filter changes
+watch([modelSearch, selectedTypeFilter, selectedModelExpansion], () => {
   currentPage.value = 0
 })
 
@@ -813,7 +836,7 @@ async function loadModelById(modelId: number): Promise<void> {
       const updated = new Map(modelCategories.value)
       updated.set(modelId, category)
       modelCategories.value = updated
-      saveCachedCategories(selectedRange.value, updated)
+      saveCachedCategories('all', updated)
     }
   } catch (err) {
     modelViewer.error.value = `Failed to load ${path}: ${err instanceof Error ? err.message : String(err)}`
@@ -829,6 +852,7 @@ const zoneSearch = ref('')
 const currentZoneId = ref<number | null>(null)
 const currentZoneName = ref<string | null>(null)
 const currentZonePath = ref<string | null>(null)
+const currentZoneExpansion = ref<string | null>(null)
 const zoneCurrentPage = ref(0)
 
 const ZONE_PAGE_SIZE = 80
@@ -836,9 +860,37 @@ const ZONE_PAGE_SIZE = 80
 interface ZoneEntry {
   readonly id: number
   readonly name: string
+  readonly path: string
+  readonly expansion: string
 }
 
 const allZones = ref<ZoneEntry[]>([])
+const selectedExpansionFilter = ref<string>('all')
+
+/** Map a ROM path to its expansion era. */
+function expansionFromPath(path: string): string {
+  if (path.startsWith('ROM2/')) return 'CoP'
+  if (path.startsWith('ROM3/')) return 'ToAU'
+  if (path.startsWith('ROM4/')) return 'Base'
+  if (path.startsWith('ROM5/')) return 'WotG'
+  if (path.startsWith('ROM6/')) return 'SoA'
+  if (path.startsWith('ROM7/')) return 'RoV'
+  if (path.startsWith('ROM8/')) return 'VR'
+  if (path.startsWith('ROM9/')) return 'New'
+  return 'Base'
+}
+
+const expansionFilterOptions = [
+  { key: 'all', label: 'All' },
+  { key: 'Base', label: 'Base' },
+  { key: 'CoP', label: 'CoP' },
+  { key: 'ToAU', label: 'ToAU' },
+  { key: 'WotG', label: 'WotG' },
+  { key: 'SoA', label: 'SoA' },
+  { key: 'RoV', label: 'RoV' },
+  { key: 'VR', label: 'VR' },
+  { key: 'New', label: 'Newest' },
+]
 
 function buildZoneList(): void {
   if (!zoneNameTable || !resourceTableRuntime) { return }
@@ -850,24 +902,28 @@ function buildZoneList(): void {
   for (let i = 0; i < names.length; i++) {
     const name = names[i]
     if (!name || name.trim() === '' || name === 'none') { continue }
-    // Only include zones that have a valid DAT path
     const path = getZoneDatPath(i, ftm)
     if (path) {
-      entries.push({ id: i, name: name.trim() })
+      entries.push({ id: i, name: name.trim(), path, expansion: expansionFromPath(path) })
     }
   }
 
   allZones.value = entries
 }
 
+const expansionFilteredZones = computed(() => {
+  const expKey = selectedExpansionFilter.value
+  if (expKey === 'all') { return allZones.value }
+  return allZones.value.filter(z => z.expansion === expKey)
+})
+
 const filteredZones = computed(() => {
   const q = zoneSearch.value.trim().toLowerCase()
-  if (!q) { return allZones.value }
+  if (!q) { return expansionFilteredZones.value }
 
-  // Allow searching by numeric ID or name
   const numericId = parseInt(q, 10)
 
-  return allZones.value.filter(zone => {
+  return expansionFilteredZones.value.filter(zone => {
     if (!isNaN(numericId) && zone.id === numericId) { return true }
     return zone.name.toLowerCase().includes(q)
   })
@@ -879,8 +935,8 @@ const paginatedZones = computed(() => {
   return filteredZones.value.slice(start, start + ZONE_PAGE_SIZE)
 })
 
-// Reset page when search changes
-watch(zoneSearch, () => {
+// Reset page when search or expansion filter changes
+watch([zoneSearch, selectedExpansionFilter], () => {
   zoneCurrentPage.value = 0
 })
 
@@ -938,6 +994,7 @@ async function loadZoneById(zoneId: number): Promise<void> {
   currentZoneId.value = zoneId
   currentZoneName.value = zoneNameTable.getZoneName(zoneId)
   currentZonePath.value = path
+  currentZoneExpansion.value = expansionFromPath(path)
 
   // Ensure the active item is on the visible page
   const zoneIdx = filteredZones.value.findIndex(z => z.id === zoneId)
@@ -996,10 +1053,6 @@ function onKeyDown(event: KeyboardEvent): void {
   }
 }
 
-watch(selectedRange, () => {
-  scanRange()
-})
-
 onMounted(async () => {
   window.addEventListener('keydown', onKeyDown)
 
@@ -1007,7 +1060,6 @@ onMounted(async () => {
     resourceTableRuntime = createResourceTableRuntime({
       baseUrl: datBaseUrl,
       headers: datHeaders,
-      fileTableCount: 1,
     })
     await resourceTableRuntime.preloadAll()
 
@@ -1032,7 +1084,7 @@ onMounted(async () => {
     await zoneNameTable.preload()
 
     isReady.value = true
-    scanRange()
+    scanAllModels()
     buildZoneList()
   } catch (err) {
     const msg = `Failed to initialize: ${err instanceof Error ? err.message : String(err)}`
@@ -1103,6 +1155,8 @@ onUnmounted(() => {
   border: 1px solid #8aa4a6;
   border-radius: 10px;
   overflow: hidden;
+  flex-shrink: 0;
+  min-height: 2.25rem;
 }
 
 .mode-btn {
@@ -1113,9 +1167,10 @@ onUnmounted(() => {
   font-family: inherit;
   font-size: 0.88rem;
   font-weight: 500;
-  padding: 0.5rem 0.75rem;
+  padding: 0.4rem 0.5rem;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
 }
 
 .mode-btn + .mode-btn {
@@ -1378,6 +1433,57 @@ select {
   display: flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+/* Expansion Badges */
+.exp-badge {
+  font-family: 'IBM Plex Mono', 'Consolas', monospace;
+  font-size: 0.6rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.exp-base {
+  background: rgba(140, 140, 120, 0.18);
+  color: #5e5e4a;
+}
+
+.exp-cop {
+  background: rgba(100, 140, 180, 0.18);
+  color: #3a6088;
+}
+
+.exp-toau {
+  background: rgba(180, 140, 60, 0.18);
+  color: #8a6a20;
+}
+
+.exp-wotg {
+  background: rgba(120, 160, 100, 0.18);
+  color: #4a7040;
+}
+
+.exp-soa {
+  background: rgba(160, 100, 160, 0.18);
+  color: #704a70;
+}
+
+.exp-rov {
+  background: rgba(180, 80, 80, 0.18);
+  color: #8a3a3a;
+}
+
+.exp-vr {
+  background: rgba(80, 160, 180, 0.18);
+  color: #2a6a7a;
+}
+
+.exp-new {
+  background: rgba(180, 120, 180, 0.18);
+  color: #7a4a80;
 }
 
 /* Model / Zone List */
